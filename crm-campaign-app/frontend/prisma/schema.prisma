@@ -1,0 +1,48 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String     @id @default(auto()) @map("_id") @db.ObjectId
+  email     String     @unique
+  password  String
+  name      String?
+  role      String     @default("user")
+  segments  Segment[]
+  campaigns Campaign[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+model Segment {
+  id          String     @id @default(auto()) @map("_id") @db.ObjectId
+  name        String
+  description String?
+  rules       Json
+  userId      String     @db.ObjectId
+  user        User       @relation(fields: [userId], references: [id])
+  campaigns   Campaign[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+model Campaign {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  name         String
+  description  String?
+  type         String   @default("email")
+  segmentId    String   @db.ObjectId
+  segment      Segment  @relation(fields: [segmentId], references: [id])
+  userId       String   @db.ObjectId
+  user         User     @relation(fields: [userId], references: [id])
+  message      Json
+  status       String   @default("draft")
+  scheduledDate String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
