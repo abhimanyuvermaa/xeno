@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Modal from '@/app/components/common/Modal';
 import CampaignForm from '@/app/components/campaigns/CampaignForm';
 import { Campaign, Segment } from '@/app/types/next-auth';
+import DashboardOverview from '@/app/components/dashboard/DashboardOverview';
 
 export default function Campaigns() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);

@@ -1,15 +1,21 @@
 import prisma from '@/lib/prisma';
-import { Campaign, Segment } from '@prisma/client';
+import { Campaign, Segment, CommunicationLog } from '@prisma/client';
 
 interface MessageDeliveryResult {
   success: boolean;
+  messageId?: string;
   error?: string;
+}
+
+interface BatchProcessingResult {
+  total: number;
+  successful: number;
+  failed: number;
 }
 
 export class CampaignProcessor {
   static async executeCampaign(campaignId: string): Promise<void> {
     try {
-      // Get campaign with segment
       const campaign = await prisma.campaign.findUnique({
         where: { id: campaignId },
         include: {
@@ -21,34 +27,69 @@ export class CampaignProcessor {
         throw new Error('Campaign not found');
       }
 
-      // Update campaign status to IN_PROGRESS
-      await prisma.campaign.update({
-        where: { id: campaignId },
-        data: { status: 'IN_PROGRESS' },
-      });
-
-      // Get customers in segment based on rules
-      const customers = await this.getCustomersInSegment(campaign.segment);
-
-      // Process messages in batches
-      const batchSize = 100;
-      for (let i = 0; i < customers.length; i += batchSize) {
-        const batch = customers.slice(i, i + batchSize);
-        await this.processBatch(campaign, batch);
+      // Validate campaign status
+      if (['COMPLETED', 'FAILED'].includes(campaign.status)) {
+        throw new Error(`Campaign is already ${campaign.status.toLowerCase()}`);
       }
 
-      // Update campaign status to COMPLETED
+      // Update campaign status and start time
       await prisma.campaign.update({
         where: { id: campaignId },
-        data: { status: 'COMPLETED' },
+        data: { 
+          status: 'IN_PROGRESS',
+          startedAt: new Date()
+        },
       });
+
+      // Get eligible customers
+      const customers = await this.getCustomersInSegment(campaign.segment);
+      
+      if (customers.length === 0) {
+        throw new Error('No eligible customers found for this segment');
+      }
+
+      // Process in batches
+      const batchResults: BatchProcessingResult[] = [];
+      const batchSize = 100;
+      
+      for (let i = 0; i < customers.length; i += batchSize) {
+        const batch = customers.slice(i, i + batchSize);
+        const batchResult = await this.processBatch(campaign, batch);
+        batchResults.push(batchResult);
+      }
+
+      // Calculate final statistics
+      const finalStats = batchResults.reduce((acc, curr) => ({
+        total: acc.total + curr.total,
+        successful: acc.successful + curr.successful,
+        failed: acc.failed + curr.failed
+      }), { total: 0, successful: 0, failed: 0 });
+
+      // Update campaign completion status and metrics
+      await prisma.campaign.update({
+        where: { id: campaignId },
+        data: { 
+          status: 'COMPLETED',
+          completedAt: new Date(),
+          metrics: {
+            totalMessages: finalStats.total,
+            successfulDeliveries: finalStats.successful,
+            failedDeliveries: finalStats.failed,
+            deliveryRate: (finalStats.successful / finalStats.total) * 100
+          }
+        },
+      });
+
     } catch (error) {
       console.error('Campaign execution error:', error);
       
-      // Update campaign status to FAILED
       await prisma.campaign.update({
         where: { id: campaignId },
-        data: { status: 'FAILED' },
+        data: { 
+          status: 'FAILED',
+          error: error instanceof Error ? error.message : 'Unknown error occurred',
+          completedAt: new Date()
+        },
       });
       
       throw error;
@@ -59,69 +100,127 @@ export class CampaignProcessor {
     const { rules } = segment;
     const query: any = {};
 
-    if (rules.minPurchaseAmount) {
-      query.totalSpending = { gte: rules.minPurchaseAmount };
-    }
+    // Build dynamic query based on segment rules
+    Object.entries(rules).forEach(([key, value]) => {
+      switch (key) {
+        case 'minPurchaseAmount':
+          query.totalSpending = { gte: value };
+          break;
+        case 'minVisitCount':
+          query.visitCount = { gte: value };
+          break;
+        case 'lastVisitDays':
+          const daysAgo = new Date();
+          daysAgo.setDate(daysAgo.getDate() - Number(value));
+          query.lastVisit = { gte: daysAgo };
+          break;
+        // Add more rule types as needed
+      }
+    });
 
-    if (rules.minVisitCount) {
-      query.visitCount = { gte: rules.minVisitCount };
-    }
-
-    if (rules.lastVisitDays) {
-      const daysAgo = new Date();
-      daysAgo.setDate(daysAgo.getDate() - rules.lastVisitDays);
-      query.lastVisit = { gte: daysAgo };
-    }
-
-    return await prisma.customer.findMany({ where: query });
+    return await prisma.customer.findMany({ 
+      where: query,
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true
+      }
+    });
   }
 
-  private static async processBatch(campaign: Campaign, customers: any[]): Promise<void> {
-    const logs = customers.map(customer => ({
-      campaignId: campaign.id,
-      customerId: customer.id,
-      type: campaign.type,
-      message: this.personalizeMessage(campaign.message, customer),
-      status: 'PENDING',
-    }));
+  private static async processBatch(
+    campaign: Campaign, 
+    customers: any[]
+  ): Promise<BatchProcessingResult> {
+    const batchResult = {
+      total: customers.length,
+      successful: 0,
+      failed: 0
+    };
 
     // Create communication logs
-    await prisma.communicationLog.createMany({
-      data: logs,
+    const logs = await prisma.communicationLog.createMany({
+      data: customers.map(customer => ({
+        campaignId: campaign.id,
+        customerId: customer.id,
+        type: campaign.type,
+        message: this.personalizeMessage(campaign.message, customer),
+        status: 'PENDING',
+        createdAt: new Date()
+      })),
     });
 
     // Process each message
-    for (const log of logs) {
+    const createdLogs = await prisma.communicationLog.findMany({
+      where: {
+        campaignId: campaign.id,
+        status: 'PENDING',
+      },
+      orderBy: {
+        createdAt: 'asc'
+      }
+    });
+
+    for (const log of createdLogs) {
       const result = await this.sendMessage(log);
       
-      // Update communication log status
       await prisma.communicationLog.update({
         where: { id: log.id },
         data: { 
           status: result.success ? 'SENT' : 'FAILED',
-          error: result.error
+          messageId: result.messageId,
+          error: result.error,
+          sentAt: new Date()
         },
       });
+
+      if (result.success) {
+        batchResult.successful++;
+      } else {
+        batchResult.failed++;
+      }
     }
+
+    return batchResult;
   }
 
   private static personalizeMessage(message: any, customer: any): string {
+    const placeholders = {
+      '[Name]': customer.name,
+      '[Email]': customer.email,
+      '[Phone]': customer.phone || 'N/A'
+    };
+
     let personalizedMessage = message.body;
-    // Replace placeholders with customer data
-    personalizedMessage = personalizedMessage.replace('[Name]', customer.name);
+    Object.entries(placeholders).forEach(([placeholder, value]) => {
+      personalizedMessage = personalizedMessage.replace(
+        new RegExp(placeholder, 'g'), 
+        value
+      );
+    });
+
     return personalizedMessage;
   }
 
-  private static async sendMessage(log: any): Promise<MessageDeliveryResult> {
-    // Simulate message sending with 90% success rate
-    const success = Math.random() < 0.9;
-    
-    // Simulate API delay
-    await new Promise(resolve => setTimeout(resolve, 100));
-
-    return {
-      success,
-      error: success ? undefined : 'Failed to deliver message'
-    };
+  private static async sendMessage(log: CommunicationLog): Promise<MessageDeliveryResult> {
+    try {
+      // Simulate network delay
+      await new Promise(resolve => setTimeout(resolve, Math.random() * 400 + 100));
+      
+      // Simulate 90% success rate
+      const success = Math.random() < 0.9;
+      
+      return {
+        success,
+        messageId: success ? `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}` : undefined,
+        error: success ? undefined : 'Failed to deliver message'
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred'
+      };
+    }
   }
 }

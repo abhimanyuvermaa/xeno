@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Campaign } from "@/app/types/next-auth";
 import CampaignStats from "@/app/components/campaigns/CampaignStats";
 import CommunicationLogs from "@/app/components/campaigns/CommunicationLogs";
+import CampaignAnalytics from '@/app/components/campaigns/CampaignAnalytics';
 
 export default function CampaignDetail({ params }: { params: { id: string } }) {
   const [campaign, setCampaign] = useState<Campaign | null>(null);
@@ -79,6 +80,10 @@ export default function CampaignDetail({ params }: { params: { id: string } }) {
           </h2>
           <CommunicationLogs campaignId={params.id} />
         </div>
+        <div className="mt-8">
+  <h2 className="text-lg font-medium text-gray-900 mb-4">Campaign Analytics</h2>
+  <CampaignAnalytics campaignId={params.id} />
+</div>
       </div>
     </div>
   );
